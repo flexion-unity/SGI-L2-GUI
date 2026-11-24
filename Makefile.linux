@@ -1,0 +1,16 @@
+#
+# SGI-L2-GUI - Linux / gcc build (development + smoke testing only)
+#
+#   make -f Makefile.linux          (needs libmotif-dev, libxt-dev)
+#   make -f Makefile.linux test
+#   make -f Makefile.linux clean
+#
+# Re-uses the IRIX Makefile with gcc settings. Compiles in strict C89
+# to catch anything MIPSpro would reject.
+#
+
+LINUX_CFLAGS = -std=c89 -pedantic -Wall -Wextra -Wdeclaration-after-statement \
+               -Wno-overlength-strings -Wno-unused-parameter -D_DEFAULT_SOURCE -O2 -g
+
+all test clean sgil2gui:
+	$(MAKE) -f Makefile CC=gcc CFLAGS="$(LINUX_CFLAGS)" LDFLAGS= $@

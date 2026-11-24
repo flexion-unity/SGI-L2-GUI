@@ -1,0 +1,14 @@
+### Settings file: ~/.sgil2guirc
+
+host          = 192.168.0.100
+port          = 23
+# exact L2 prompt, leave empty to auto detect
+prompt        = SGI-L2-001-L2>
+eol           = lf            # lf | crlf | cr  - line ending sent to the L2
+timeout       = 30            # seconds to wait for the prompt
+sort          = desc          # desc | asc | custom
+sortorder     = 001c01 001c02 001c03 001c04 001r20
+routerstyle   = default       # default | altix
+altix350style = yellow        # yellow | grey
+refresh       = 0             # auto refresh interval in seconds, 0 = off
+confirmpower  = 1
