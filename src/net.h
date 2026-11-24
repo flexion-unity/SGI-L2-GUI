@@ -1,5 +1,5 @@
 /*
- * net.h - TCP helpers shared by the telnet, direct L2 and console code
+ * net.h - TCP helpers shared by the L2 connection and the L2 Terminal
  */
 #ifndef SGIL2_NET_H
 #define SGIL2_NET_H

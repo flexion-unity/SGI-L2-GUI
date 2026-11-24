@@ -1,18 +1,12 @@
 ### Settings file: ~/.sgil2guirc
 
 host          = 192.168.0.100
-connection    = direct        # direct (the L2's protocol, port 8000) | telnet
-# direct connection
+# the L2's command port
 l2port        = 8000
 # L2 password, only if the L2 has one (l2passwd). no comment on this line!
 password      =
 # L2 Terminal: 1 = console port 8003 (sessions not logged), 0 = 8001
 consolequiet  = 0
-# telnet connection
-port          = 23
-# exact L2 prompt, leave empty to auto detect
-prompt        = SGI-L2-001-L2>
-eol           = lf            # lf | crlf | cr  - line ending sent to the L2
 timeout       = 30            # seconds to wait for a command's response
 sort          = desc          # desc | asc | custom
 sortorder     = 001c01 001c02 001c03 001c04 001r20

@@ -1,10 +1,10 @@
 /*
- * l2client.h - asynchronous L2 command queue on top of telnet.c
+ * l2client.h - asynchronous L2 command queue on top of l2direct.c
  *
  * Commands are queued and executed one after another on the single L2
- * telnet session. Socket input is handled with XtAppAddInput so the UI
- * never blocks while waiting for the L2 prompt. The connection is opened
- * on demand and re-opened transparently if the L2 dropped it.
+ * connection. Socket input is handled with XtAppAddInput so the UI
+ * never blocks while waiting for the L2's response. The connection is
+ * opened on demand and re-opened transparently if the L2 dropped it.
  */
 #ifndef SGIL2_L2CLIENT_H
 #define SGIL2_L2CLIENT_H

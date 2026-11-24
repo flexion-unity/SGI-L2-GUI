@@ -544,7 +544,7 @@ void dlg_console(void)
 
 /*
  * The SMP port (8001, or 8003 whose sessions the L2 does not log): a plain
- * byte stream with no telnet negotiation. The L2 echoes what is typed,
+ * byte stream (no telnet negotiation). The L2 echoes what is typed,
  * ends lines with CR LF and sends its prompt on connect. Each dialog is
  * its own console session.
  */
@@ -826,9 +826,9 @@ void dlg_rackinfo(void)
 /* settings                                                            */
 /* ------------------------------------------------------------------ */
 
-static Widget st_form, st_host, st_port, st_prompt, st_timeout, st_refresh, st_order;
-static Widget st_crlf, st_asc, st_custom, st_ralt, st_grey, st_confirm;
-static Widget st_direct, st_telnet, st_l2port, st_password, st_quiet;
+static Widget st_form, st_host, st_timeout, st_refresh, st_order;
+static Widget st_asc, st_custom, st_ralt, st_grey, st_confirm;
+static Widget st_l2port, st_password, st_quiet;
 static char   st_pw[64];        /* the password typed (the field shows stars) */
 
 /* keep the real password in st_pw and show '*' for each character */
@@ -858,22 +858,6 @@ static void st_pw_verify(Widget w, XtPointer cd, XtPointer cbs)
     for (i = 0; i < ins; i++) v->text->ptr[i] = '*';
 }
 
-/* only the fields of the chosen connection are active */
-static void st_conn_changed(Widget w, XtPointer cd, XtPointer cbs)
-{
-    Boolean d;
-    (void)w;
-    (void)cd;
-    (void)cbs;
-    if (!st_form) return;
-    d = XmToggleButtonGetState(st_direct);
-    XtSetSensitive(st_l2port, d);
-    XtSetSensitive(st_password, d);
-    XtSetSensitive(st_port, !d);
-    XtSetSensitive(st_prompt, !d);
-    XtSetSensitive(st_crlf, !d);
-}
-
 static Widget st_field(Widget grid, const char *lbl, const char *name, const char *val)
 {
     Widget w;
@@ -898,29 +882,22 @@ static void st_apply(int save)
     int reconnect;
 
     st_get(st_host, c.host, sizeof(c.host));
-    c.conn = XmToggleButtonGetState(st_telnet) ? CONN_TELNET : CONN_DIRECT;
     st_get(st_l2port, tmp, sizeof(tmp));
     c.l2port = atoi(tmp) > 0 ? atoi(tmp) : 8000;
     s_copy(c.password, st_pw, sizeof(c.password));
     c.consoleQuiet = XmToggleButtonGetState(st_quiet) ? 1 : 0;
-    st_get(st_port, tmp, sizeof(tmp));
-    c.port = atoi(tmp) > 0 ? atoi(tmp) : 23;
-    st_get(st_prompt, c.prompt, sizeof(c.prompt));
     st_get(st_timeout, tmp, sizeof(tmp));
     c.timeout = atoi(tmp) > 0 ? atoi(tmp) : 30;
     st_get(st_refresh, tmp, sizeof(tmp));
     c.refresh = atoi(tmp) > 0 ? atoi(tmp) : 0;
     st_get(st_order, c.sortOrder, sizeof(c.sortOrder));
-    c.eol = XmToggleButtonGetState(st_crlf) ? EOL_CRLF : EOL_LF;
     if (XmToggleButtonGetState(st_custom)) c.sortMode = L2_SORT_CUSTOM;
     else c.sortMode = XmToggleButtonGetState(st_asc) ? L2_SORT_ASC : L2_SORT_DESC;
     c.routerAltix = XmToggleButtonGetState(st_ralt) ? 1 : 0;
     c.altix350Grey = XmToggleButtonGetState(st_grey) ? 1 : 0;
     c.confirmPower = XmToggleButtonGetState(st_confirm) ? 1 : 0;
 
-    reconnect = strcmp(c.host, g_cfg.host) != 0 || c.port != g_cfg.port ||
-                strcmp(c.prompt, g_cfg.prompt) != 0 || c.eol != g_cfg.eol ||
-                c.conn != g_cfg.conn || c.l2port != g_cfg.l2port ||
+    reconnect = strcmp(c.host, g_cfg.host) != 0 || c.l2port != g_cfg.l2port ||
                 strcmp(c.password, g_cfg.password) != 0;
     g_cfg = c;
     if (save) {
@@ -958,10 +935,8 @@ static void st_destroy_cb(Widget w, XtPointer cd, XtPointer cbs)
 
 void dlg_settings(void)
 {
-    Widget rc, col, grid, frame, opts, save, radio;
-    char port[16], l2port[16], timeout[16], refresh[16], stars[sizeof(st_pw)];
-    Arg a[4];
-    int n = 0;
+    Widget rc, col, grid, frame, opts, save;
+    char l2port[16], timeout[16], refresh[16], stars[sizeof(st_pw)];
     size_t i;
 
     if (st_form) {
@@ -988,35 +963,25 @@ void dlg_settings(void)
                                   NULL);
 
     label(col, "sectionLabel", "L2 controller connection");
-    XtSetArg(a[n], XmNorientation, XmHORIZONTAL); n++;
-    radio = XmCreateRadioBox(col, "connection", a, n);
-    st_direct = toggle(radio, "direct", "Direct L2 (port 8000, recommended)",
-                       g_cfg.conn == CONN_DIRECT);
-    st_telnet = toggle(radio, "telnet", "Telnet", g_cfg.conn == CONN_TELNET);
-    XtAddCallback(st_direct, XmNvalueChangedCallback, st_conn_changed, NULL);
-    XtManageChild(radio);
 
     grid = XtVaCreateManagedWidget("grid", xmRowColumnWidgetClass, col,
                                    XmNorientation, XmHORIZONTAL,
                                    XmNpacking, XmPACK_COLUMN,
-                                   XmNnumColumns, 8,
+                                   XmNnumColumns, 6,
                                    XmNisAligned, True,
                                    XmNentryAlignment, XmALIGNMENT_END,
                                    NULL);
-    sprintf(port, "%d", g_cfg.port);
     sprintf(l2port, "%d", g_cfg.l2port);
     sprintf(timeout, "%d", g_cfg.timeout);
     sprintf(refresh, "%d", g_cfg.refresh);
     st_host = st_field(grid, "L2 host / IP:", "host", g_cfg.host);
-    st_l2port = st_field(grid, "L2 port (direct):", "l2port", l2port);
+    st_l2port = st_field(grid, "L2 port (8000):", "l2port", l2port);
     /* (the stars are set before the callback, which keeps the real text) */
     s_copy(st_pw, g_cfg.password, sizeof(st_pw));
     for (i = 0; st_pw[i]; i++) stars[i] = '*';
     stars[i] = '\0';
-    st_password = st_field(grid, "L2 password (direct):", "password", stars);
+    st_password = st_field(grid, "L2 password (if set):", "password", stars);
     XtAddCallback(st_password, XmNmodifyVerifyCallback, st_pw_verify, NULL);
-    st_port = st_field(grid, "Telnet port:", "port", port);
-    st_prompt = st_field(grid, "L2 prompt (telnet, empty = detect):", "prompt", g_cfg.prompt);
     st_timeout = st_field(grid, "Command timeout (s):", "timeout", timeout);
     st_refresh = st_field(grid, "Auto refresh (s, 0 = off):", "refresh", refresh);
     st_order = st_field(grid, "Custom sort order:", "sortOrder", g_cfg.sortOrder);
@@ -1024,8 +989,6 @@ void dlg_settings(void)
     frame = XtVaCreateManagedWidget("optionsFrame", xmFrameWidgetClass, col, NULL);
     opts = XtVaCreateManagedWidget("options", xmRowColumnWidgetClass, frame,
                                    XmNorientation, XmVERTICAL, NULL);
-    st_crlf = toggle(opts, "crlf", "Telnet: send CR+LF line endings (default: LF)",
-                     g_cfg.eol == EOL_CRLF);
     st_quiet = toggle(opts, "consoleQuiet", "L2 Terminal: quiet console (port 8003, not logged)",
                       g_cfg.consoleQuiet);
     st_asc = toggle(opts, "ascending", "Sort bricks ascending (default: descending)",
@@ -1037,6 +1000,5 @@ void dlg_settings(void)
     st_confirm = toggle(opts, "confirmPower", "Confirm power up / down", g_cfg.confirmPower);
 
     XtVaSetValues(st_form, XmNdefaultButton, save, NULL);
-    st_conn_changed(NULL, NULL, NULL);
     XtManageChild(st_form);
 }

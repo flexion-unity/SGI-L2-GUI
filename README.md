@@ -4,7 +4,7 @@ Based on [SGI-L2-WUI](https://github.com/flexion-unity/SGI-L2-WUI) by flexion, c
 
 `sgil2gui` is a native IRIX 6.5 / Motif application for the SGI L2 system controller. 
 
-* talks to your L2 controller directly over its own protocol (TCP 8000, as SGI's `l2cmd` does) or over telnet
+* talks to your L2 controller directly over its own protocol (TCP 8000, as SGI's `l2cmd` does)
 * renders the server rack inventory in the GUI
 * shows LCD text, power / attention / failure LEDs of every brick
 * power up / down the whole rack or single bricks
@@ -21,14 +21,11 @@ Tezro (rackmount), Altix 350 (yellow or grey bezel), Altix 3000 C-brick, Altix 3
 * **Tools > L2 Console** (Ctrl+L): send L2 commands
 * **Tools > L2 Terminal**: the L2's raw console port (8001, or 8003 "quiet" whose sessions the L2 does not log)
 
-## Connection: direct L2 or telnet
+## Connection
 
-Choose in **File > Settings** (or `connection =` in `~/.sgil2guirc`):
+Connects to the L2's command port 8000, speaking SGI's Router / IRouter protocol like `l2cmd`. Supports an L2 password (`l2passwd`).
 
-* **Direct L2** (default): one connection to the L2's command port 8000, speaking SGI's Router / IRouter protocol like `l2cmd`. Each command gets its own response - no prompt to match, no connect delay, no idle disconnect. Commands separated by `;` run one after another; a busy L2 is asked again. Supports an L2 password (`l2passwd`).
-* **Telnet**: the L2's shell on port 23, finishing each command when the prompt is seen (set the exact prompt, or leave it empty to detect it).
-
-The direct protocol is ported from the [SGI-L2-WUI](https://github.com/flexion-unity/SGI-L2-WUI) backend.
+The direct protocol was ported from nater1217's implementation of the direct connection mode in SGI-L2-WUI, replacing telnet connection mode.
 
 
 ## Build and install (IRIX)
@@ -47,8 +44,7 @@ make install    # as root: /usr/local/bin/sgil2gui + app-defaults
 sgil2gui                                 # launch GUI. uses ~/.sgil2guirc
 
 sgil2gui -host 192.168.0.100             # override the L2 host
-sgil2gui -host l2 -password secret       # direct connection to an L2 with a password
-sgil2gui -host l2 -telnet -prompt "SGI-L2-001-L2>"
+sgil2gui -host l2 -password secret       # an L2 with a password
 sgil2gui -host l2 -cmd "config"          # one command, printed, no X
 sgil2gui -host l2 -summary               # parsed rack summary, no X
 sgil2gui -demo                           # built-in L2 simulator, no hardware

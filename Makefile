@@ -24,7 +24,7 @@ APPDEF  = /usr/lib/X11/app-defaults
 
 PROG    = sgil2gui
 
-CORE_OBJS = src/util.o src/l2parse.o src/config.o src/net.o src/telnet.o \
+CORE_OBJS = src/util.o src/l2parse.o src/config.o src/net.o \
             src/router.o src/irouter.o src/l2direct.o src/demo.o
 
 OBJS    = $(CORE_OBJS) src/image.o src/skins.o src/rack.o src/l2client.o \
@@ -73,15 +73,14 @@ src/util.o: src/util.h
 src/l2parse.o: src/l2parse.h src/util.h
 src/config.o: src/config.h src/l2parse.h src/util.h
 src/net.o: src/net.h src/util.h
-src/telnet.o: src/telnet.h src/net.h src/util.h
 src/router.o: src/router.h src/util.h
 src/irouter.o: src/irouter.h src/router.h src/util.h
-src/l2direct.o: src/l2direct.h src/telnet.h src/router.h src/irouter.h src/net.h src/util.h
+src/l2direct.o: src/l2direct.h src/router.h src/irouter.h src/net.h src/util.h
 src/demo.o: src/demo.h src/util.h
 src/image.o: src/image.h src/util.h
 src/skins.o: src/skins.h src/image.h src/l2parse.h src/img/images.h
 src/rack.o: src/rack.h src/skins.h src/image.h src/l2parse.h src/util.h
-src/l2client.o: src/l2client.h src/config.h src/telnet.h src/l2direct.h src/demo.h src/util.h
+src/l2client.o: src/l2client.h src/config.h src/l2direct.h src/demo.h src/util.h
 src/dialogs.o: src/app.h src/config.h src/l2parse.h src/l2client.h src/net.h src/rack.h src/util.h
 src/main.o: src/app.h src/config.h src/l2parse.h src/l2client.h src/rack.h \
-            src/telnet.h src/l2direct.h src/demo.h src/util.h
+            src/l2direct.h src/demo.h src/util.h

@@ -1,5 +1,5 @@
 /*
- * net.c - TCP helpers shared by the telnet, direct L2 and console code
+ * net.c - TCP helpers shared by the L2 connection and the L2 Terminal
  */
 #include <stdio.h>
 #include <stdlib.h>

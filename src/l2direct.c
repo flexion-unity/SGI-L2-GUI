@@ -14,7 +14,6 @@
 #include <unistd.h>
 
 #include "l2direct.h"
-#include "telnet.h"     /* TN_* return codes */
 #include "router.h"
 #include "irouter.h"
 #include "net.h"
@@ -388,12 +387,12 @@ int l2d_begin(const char *part)
 int l2d_pump(void)
 {
     int dummy = 1;
-    if (d_sock < 0) return TN_EOF;
+    if (d_sock < 0) return L2D_EOF;
     if (read_and_handle(NULL, &dummy) < 0) {
         l2d_close();
-        return d_have ? TN_DONE : TN_EOF;
+        return d_have ? L2D_DONE : L2D_EOF;
     }
-    return d_have ? TN_DONE : TN_AGAIN;
+    return d_have ? L2D_DONE : L2D_AGAIN;
 }
 
 char *l2d_take_response(int *status)
@@ -447,9 +446,9 @@ static int wait_response(int timeout_ms)
     int rc;
     for (;;) {
         rc = l2d_pump();
-        if (rc != TN_AGAIN) return rc;
-        if (net_now_ms() >= deadline) return TN_TIMEOUT;
-        if (net_wait_readable(d_sock, deadline - net_now_ms()) < 0) return TN_EOF;
+        if (rc != L2D_AGAIN) return rc;
+        if (net_now_ms() >= deadline) return L2D_TIMEOUT;
+        if (net_wait_readable(d_sock, deadline - net_now_ms()) < 0) return L2D_EOF;
     }
 }
 
@@ -469,16 +468,16 @@ int l2d_exec(const char *cmd, int timeout_ms, char **out)
             if (rc == -2) {
                 dbuf_free(&all);
                 set_err("command too long");
-                return TN_EOF;
+                return L2D_EOF;
             }
             if (rc < 0) {
                 dbuf_free(&all);
-                return TN_EOF;
+                return L2D_EOF;
             }
             if (rc == 0) {
                 rc = wait_response(timeout_ms);
-                if (rc != TN_DONE) {
-                    if (rc == TN_TIMEOUT) l2d_close();     /* (out of step now) */
+                if (rc != L2D_DONE) {
+                    if (rc == L2D_TIMEOUT) l2d_close();     /* (out of step now) */
                     dbuf_free(&all);
                     return rc;
                 }
@@ -494,5 +493,5 @@ int l2d_exec(const char *cmd, int timeout_ms, char **out)
     }
     if (out) *out = s_dup(all.data);
     dbuf_free(&all);
-    return TN_DONE;
+    return L2D_DONE;
 }
