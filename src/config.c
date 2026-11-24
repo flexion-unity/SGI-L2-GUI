@@ -4,6 +4,10 @@
  * Format: one "key = value" per line, '#' starts a comment.
  *
  *   host          = 192.168.0.100
+ *   connection    = direct | telnet
+ *   l2port        = 8000
+ *   password      =
+ *   consolequiet  = 0
  *   port          = 23
  *   prompt        = SGI-L2-001-L2>
  *   eol           = lf | crlf | cr
@@ -18,6 +22,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 #include "config.h"
 #include "l2parse.h"
@@ -26,7 +32,10 @@
 void cfg_defaults(AppConfig *c)
 {
     memset(c, 0, sizeof(*c));
+    c->conn = CONN_DIRECT;
     c->port = 23;
+    c->l2port = 8000;
+    c->consoleQuiet = 0;
     c->eol = EOL_LF;
     c->timeout = 30;
     c->sortMode = L2_SORT_DESC;
@@ -51,9 +60,19 @@ const char *cfg_eol_string(int eol)
     return "\n";
 }
 
+int cfg_console_port(const AppConfig *c)
+{
+    return c->consoleQuiet ? 8003 : 8001;
+}
+
 static void set_key(AppConfig *c, const char *key, const char *val)
 {
     if (s_equal_ci(key, "host")) s_copy(c->host, val, sizeof(c->host));
+    else if (s_equal_ci(key, "connection"))
+        c->conn = s_equal_ci(val, "telnet") ? CONN_TELNET : CONN_DIRECT;
+    else if (s_equal_ci(key, "l2port")) c->l2port = atoi(val) > 0 ? atoi(val) : 8000;
+    else if (s_equal_ci(key, "password")) s_copy(c->password, val, sizeof(c->password));
+    else if (s_equal_ci(key, "consolequiet")) c->consoleQuiet = atoi(val) != 0;
     else if (s_equal_ci(key, "port")) c->port = atoi(val) > 0 ? atoi(val) : 23;
     else if (s_equal_ci(key, "prompt")) s_copy(c->prompt, val, sizeof(c->prompt));
     else if (s_equal_ci(key, "eol")) {
@@ -98,8 +117,17 @@ int cfg_save(const AppConfig *c, const char *path)
 {
     FILE *f = fopen(path, "w");
     if (!f) return 0;
+    chmod(path, 0600);      /* (may hold the L2 password) */
     fprintf(f, "# SGI-L2-GUI settings\n");
     fprintf(f, "host          = %s\n", c->host);
+    fprintf(f, "# direct = the L2's own protocol (port 8000), telnet = its shell\n");
+    fprintf(f, "connection    = %s\n", c->conn == CONN_TELNET ? "telnet" : "direct");
+    fprintf(f, "# direct connection\n");
+    fprintf(f, "l2port        = %d\n", c->l2port);
+    fprintf(f, "password      = %s\n", c->password);
+    fprintf(f, "# L2 Terminal: 1 = port 8003 (sessions not logged by the L2), 0 = 8001\n");
+    fprintf(f, "consolequiet  = %d\n", c->consoleQuiet);
+    fprintf(f, "# telnet connection\n");
     fprintf(f, "port          = %d\n", c->port);
     fprintf(f, "# exact L2 prompt, leave empty to auto detect\n");
     fprintf(f, "prompt        = %s\n", c->prompt);

@@ -37,6 +37,7 @@ void dlg_text(const char *title, const char *text);
 void dlg_about(void);
 void dlg_settings(void);
 void dlg_console(void);
+void dlg_terminal(void);
 void dlg_rackinfo(void);
 void brickdlg_show(const L2Brick *b);
 void brickdlg_update(const L2Brick *b);

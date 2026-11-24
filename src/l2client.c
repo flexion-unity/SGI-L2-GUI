@@ -1,5 +1,5 @@
 /*
- * l2client.c - asynchronous L2 command queue on top of telnet.c
+ * l2client.c - asynchronous L2 command queue on top of telnet.c or l2direct.c
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,6 +9,7 @@
 
 #include "l2client.h"
 #include "telnet.h"
+#include "l2direct.h"
 #include "demo.h"
 #include "util.h"
 
@@ -17,6 +18,12 @@ typedef struct Job {
     L2Done      cb;
     void       *ud;
     int         retried;
+    /* direct connection: the command's ;-separated parts, one at a time */
+    const char *rest;           /* after the current part */
+    char        part[1024];     /* the current part */
+    int         busy;           /* times the L2 said it was busy with it */
+    int         partsDone;
+    DBuf        out;            /* the output of the parts done */
     struct Job *next;
 } Job;
 
@@ -34,11 +41,40 @@ static int          timer_active;
 static int          dispatch_scheduled;
 
 static void dispatch(void);
+static void direct_next_part(void);
 
 static void status(const char *msg, int busy)
 {
     if (status_fn) status_fn(msg, busy);
 }
+
+/* ------------------------------------------------------------------ */
+/* transport                                                           */
+/* ------------------------------------------------------------------ */
+
+static int direct(void)
+{
+    return cfg->conn == CONN_DIRECT;
+}
+
+static int tr_connected(void)
+{
+    return direct() ? l2d_connected() : tn_connected();
+}
+
+static int tr_fd(void)
+{
+    return direct() ? l2d_fd() : tn_fd();
+}
+
+static void tr_close(void)
+{
+    /* (both: the setting may have just changed) */
+    l2d_close();
+    tn_close();
+}
+
+/* ------------------------------------------------------------------ */
 
 static void remove_timer(void)
 {
@@ -63,6 +99,13 @@ static Job *pop(void)
     return j;
 }
 
+static void free_job(Job *j)
+{
+    free(j->cmd);
+    dbuf_free(&j->out);
+    free(j);
+}
+
 static void finish(int ok, const char *resp)
 {
     Job *j = pop();
@@ -71,8 +114,7 @@ static void finish(int ok, const char *resp)
     if (!head) status(ok ? "Ready" : resp, 0);
     if (j) {
         if (j->cb) j->cb(ok, resp, j->ud);
-        free(j->cmd);
-        free(j);
+        free_job(j);
     }
     dispatch();
 }
@@ -83,8 +125,7 @@ static void fail_all(const char *err)
     remove_timer();
     while ((j = pop()) != NULL) {
         if (j->cb) j->cb(0, err, j->ud);
-        free(j->cmd);
-        free(j);
+        free_job(j);
     }
     status(err, 0);
 }
@@ -92,44 +133,28 @@ static void fail_all(const char *err)
 static void dead_connection(void)
 {
     remove_input();
-    tn_close();
+    tr_close();
 }
 
-static void on_input(XtPointer cd, int *fd, XtInputId *id)
+/* the connection broke while the head job ran: retry it once on a fresh
+   one if nothing of it was answered yet */
+static void lost_while_running(int nothing_received)
 {
-    int rc;
-    char *resp;
-    (void)cd;
-    (void)fd;
-    (void)id;
-
-    rc = tn_pump();
-    if (!running) {
-        /* idle: unsolicited output or the L2 closed the session */
-        if (rc == TN_EOF || !tn_connected()) {
-            dead_connection();
-            status("L2 closed the idle connection (reconnects on demand)", 0);
-        }
-        return;
-    }
-    if (rc == TN_AGAIN) return;
-    if (rc == TN_DONE) {
-        resp = tn_take_response(head->cmd);
-        if (!tn_connected()) dead_connection();
-        finish(1, resp);
-        free(resp);
-        return;
-    }
-    /* EOF while running: retry once on a fresh connection */
+    char msg[300];
     dead_connection();
     remove_timer();
-    if (head && !head->retried && tn_raw()[0] == '\0') {
+    if (head && !head->retried && nothing_received) {
         head->retried = 1;
         running = 0;
         dispatch();
         return;
     }
-    finish(0, "Connection to L2 lost");
+    if (direct()) {
+        sprintf(msg, "Connection to L2 lost: %.250s", l2d_error());
+        finish(0, msg);
+    } else {
+        finish(0, "Connection to L2 lost");
+    }
 }
 
 static void on_timeout(XtPointer cd, XtIntervalId *id)
@@ -140,26 +165,161 @@ static void on_timeout(XtPointer cd, XtIntervalId *id)
     if (!running) return;
     /* the session is out of sync now - start fresh next time */
     dead_connection();
-    finish(0, "Timeout waiting for the L2 prompt");
+    finish(0, direct() ? "Timeout waiting for the L2's response"
+                       : "Timeout waiting for the L2 prompt");
+}
+
+/* direct: the answer to the current part has arrived */
+static void direct_part_done(void);
+
+static void on_busy_retry(XtPointer cd, XtIntervalId *id)
+{
+    (void)cd;
+    (void)id;
+    timer_active = 0;
+    if (!running || !head) return;
+    if (!l2d_connected()) {
+        lost_while_running(0);
+        return;
+    }
+    /* send the same part again */
+    switch (l2d_begin(head->part)) {
+    case 0:
+        timer_id = XtAppAddTimeOut(app, (unsigned long)cfg->timeout * 1000UL, on_timeout, NULL);
+        timer_active = 1;
+        break;
+    case 1:
+        direct_part_done();
+        break;
+    default:
+        lost_while_running(0);
+        break;
+    }
+}
+
+static void direct_part_done(void)
+{
+    Job *j = head;
+    char *resp;
+    int st;
+
+    remove_timer();
+    resp = l2d_take_response(&st);
+    if (l2d_is_busy(resp, st) && j->busy < L2D_BUSY_RETRIES) {
+        j->busy++;
+        free(resp);
+        status("L2 is busy with another command, retrying ...", 1);
+        timer_id = XtAppAddTimeOut(app, L2D_BUSY_WAIT_MS, on_busy_retry, NULL);
+        timer_active = 1;
+        return;
+    }
+    j->busy = 0;
+    j->partsDone++;
+    if (j->out.len && *resp) dbuf_appendc(&j->out, '\n');
+    dbuf_appends(&j->out, resp);
+    free(resp);
+    direct_next_part();
+}
+
+/* direct: send the head job's next part, or finish it */
+static void direct_next_part(void)
+{
+    Job *j = head;
+    char msg[300];
+
+    if (!j) return;
+    j->rest = l2d_next_part(j->rest, j->part, sizeof(j->part));
+    if (!j->rest) {
+        finish(1, j->out.data);
+        return;
+    }
+    sprintf(msg, "L2: %.250s", j->part);
+    status(msg, 1);
+    switch (l2d_begin(j->part)) {
+    case 0:
+        timer_id = XtAppAddTimeOut(app, (unsigned long)cfg->timeout * 1000UL, on_timeout, NULL);
+        timer_active = 1;
+        break;
+    case 1:                     /* (reboot: no response comes) */
+        direct_part_done();
+        break;
+    case -2:
+        finish(0, "Command too long for the L2");
+        break;
+    default:
+        lost_while_running(j->partsDone == 0);
+        break;
+    }
+}
+
+static void on_input(XtPointer cd, int *fd, XtInputId *id)
+{
+    int rc;
+    char *resp;
+    (void)cd;
+    (void)fd;
+    (void)id;
+
+    rc = direct() ? l2d_pump() : tn_pump();
+    if (!running) {
+        /* idle: unsolicited output or the L2 closed the session */
+        if (rc == TN_EOF || !tr_connected()) {
+            dead_connection();
+            status(direct() ? "Connection to L2 lost (reconnects on demand)"
+                            : "L2 closed the idle connection (reconnects on demand)", 0);
+        }
+        return;
+    }
+    if (rc == TN_AGAIN) return;
+    if (rc == TN_DONE) {
+        if (direct()) {
+            if (!tr_connected()) remove_input();    /* (answered, then closed) */
+            direct_part_done();
+            return;
+        }
+        resp = tn_take_response(head->cmd);
+        if (!tn_connected()) dead_connection();
+        finish(1, resp);
+        free(resp);
+        return;
+    }
+    /* EOF while running: retry once on a fresh connection */
+    lost_while_running(direct() ? head->partsDone == 0 : tn_raw()[0] == '\0');
 }
 
 static int ensure_connected(void)
 {
     char err[256], msg[400];
-    if (tn_connected()) return 1;
+    int rc;
+    if (tr_connected()) {
+        if (!input_active) {
+            input_id = XtAppAddInput(app, tr_fd(), (XtPointer)XtInputReadMask, on_input, NULL);
+            input_active = 1;
+        }
+        return 1;
+    }
+    /* (a connection over the other transport is dropped) */
+    dead_connection();
 
-    sprintf(msg, "Connecting to %.200s ...", cfg->host);
-    status(msg, 1);
-    tn_set_prompt(cfg->prompt);
-    tn_set_eol(cfg_eol_string(cfg->eol));
-    if (tn_connect(cfg->host, cfg->port, 5000, err, sizeof(err)) < 0 ||
-        tn_sync_prompt(5000, err, sizeof(err)) < 0) {
-        tn_close();
+    if (direct()) {
+        sprintf(msg, "Connecting to %.200s:%d ...", cfg->host, cfg->l2port);
+        status(msg, 1);
+        rc = l2d_connect(cfg->host, cfg->l2port, cfg->password, 5000, err, sizeof(err));
+    } else {
+        sprintf(msg, "Connecting to %.200s ...", cfg->host);
+        status(msg, 1);
+        tn_set_prompt(cfg->prompt);
+        tn_set_eol(cfg_eol_string(cfg->eol));
+        rc = tn_connect(cfg->host, cfg->port, 5000, err, sizeof(err));
+        if (rc == 0) rc = tn_sync_prompt(5000, err, sizeof(err));
+    }
+    if (rc < 0) {
+        tr_close();
         sprintf(msg, "Connect to %.100s failed: %.250s", cfg->host, err);
         fail_all(msg);
         return 0;
     }
-    input_id = XtAppAddInput(app, tn_fd(), (XtPointer)XtInputReadMask, on_input, NULL);
+    input_id = XtAppAddInput(app, tr_fd(), (XtPointer)XtInputReadMask, on_input, NULL);
     input_active = 1;
     sprintf(msg, "Connected to %.200s", cfg->host);
     status(msg, 1);
@@ -196,9 +356,18 @@ static void do_dispatch(XtPointer cd, XtIntervalId *id)
         return;
     }
     if (!ensure_connected()) return;
+    running = 1;
+    if (direct()) {
+        /* (from the first part again, after a retry) */
+        head->rest = head->cmd;
+        head->busy = 0;
+        head->partsDone = 0;
+        dbuf_clear(&head->out);
+        direct_next_part();
+        return;
+    }
     sprintf(msg, "L2: %.250s", head->cmd);
     status(msg, 1);
-    running = 1;
     if (tn_begin(head->cmd) < 0) {
         dead_connection();
         running = 0;
@@ -234,10 +403,12 @@ void l2c_init(XtAppContext a, const AppConfig *c, int d, L2StatusFn fn)
 void l2c_exec(const char *cmd, L2Done cb, void *ud)
 {
     Job *j = (Job *)xmalloc(sizeof(Job));
+    memset(j, 0, sizeof(*j));
     j->cmd = s_dup(cmd);
     j->cb = cb;
     j->ud = ud;
-    j->retried = 0;
+    j->rest = j->cmd;
+    dbuf_init(&j->out);
     j->next = NULL;
     if (tail) tail->next = j;
     else head = j;
@@ -252,7 +423,7 @@ int l2c_pending(void)
 
 int l2c_connected(void)
 {
-    return demo || tn_connected();
+    return demo || tr_connected();
 }
 
 void l2c_disconnect(void)
@@ -268,5 +439,6 @@ void l2c_disconnect(void)
 
 const char *l2c_prompt(void)
 {
-    return demo ? "L2-demo>" : tn_get_prompt();
+    if (demo) return "L2-demo>";
+    return direct() ? "L2>" : tn_get_prompt();
 }

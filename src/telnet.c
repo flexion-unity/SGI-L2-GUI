@@ -6,29 +6,15 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
-#include <fcntl.h>
 #include <sys/types.h>
 #include <sys/time.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netdb.h>
 #ifdef __sgi
 #include <bstring.h>    /* FD_ZERO uses bzero on IRIX */
 #endif
 
 #include "telnet.h"
+#include "net.h"
 #include "util.h"
-
-#ifndef INADDR_NONE
-#define INADDR_NONE 0xffffffffU
-#endif
-
-#ifdef __sgi
-typedef int tn_socklen_t;
-#else
-typedef socklen_t tn_socklen_t;
-#endif
 
 /* telnet protocol bytes */
 #define T_SE    240
@@ -52,110 +38,20 @@ static int  tn_inflight = 0;    /* waiting for a prompt (command or banner) */
 static unsigned char tn_refused_do[256];
 static unsigned char tn_refused_will[256];
 
-static long now_ms(void)
-{
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (long)tv.tv_sec * 1000L + (long)(tv.tv_usec / 1000);
-}
-
-static int write_all(const char *data, size_t len)
-{
-    fd_set wfds;
-    struct timeval tv;
-    ssize_t n;
-
-    while (len > 0) {
-        n = write(tn_sock, data, len);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                FD_ZERO(&wfds);
-                FD_SET(tn_sock, &wfds);
-                tv.tv_sec = 5;
-                tv.tv_usec = 0;
-                if (select(tn_sock + 1, NULL, &wfds, NULL, &tv) <= 0) return -1;
-                continue;
-            }
-            return -1;
-        }
-        data += n;
-        len -= (size_t)n;
-    }
-    return 0;
-}
-
 static void send_opt(int verb, int opt)
 {
     unsigned char b[3];
     b[0] = T_IAC;
     b[1] = (unsigned char)verb;
     b[2] = (unsigned char)opt;
-    write_all((const char *)b, 3);
+    net_write_all(tn_sock, (const char *)b, 3);
 }
 
 int tn_connect(const char *host, int port, int timeout_ms, char *err, size_t errlen)
 {
-    struct sockaddr_in sa;
-    struct hostent *he;
-    fd_set wfds;
-    struct timeval tv;
-    int flags, rc, soerr;
-    tn_socklen_t slen;
-
     tn_close();
-    if (!host || !*host) {
-        s_copy(err, "No L2 host configured", errlen);
-        return -1;
-    }
-    memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons((unsigned short)port);
-    sa.sin_addr.s_addr = inet_addr(host);
-    if (sa.sin_addr.s_addr == (unsigned)INADDR_NONE) {
-        he = gethostbyname(host);
-        if (!he || he->h_addrtype != AF_INET) {
-            s_copy(err, "Unknown host: ", errlen);
-            s_cat(err, host, errlen);
-            return -1;
-        }
-        memcpy(&sa.sin_addr, he->h_addr_list[0], sizeof(sa.sin_addr));
-    }
-
-    tn_sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (tn_sock < 0) {
-        s_copy(err, strerror(errno), errlen);
-        return -1;
-    }
-    flags = fcntl(tn_sock, F_GETFL, 0);
-    fcntl(tn_sock, F_SETFL, flags | O_NONBLOCK);
-
-    rc = connect(tn_sock, (struct sockaddr *)&sa, sizeof(sa));
-    if (rc < 0 && errno != EINPROGRESS) {
-        s_copy(err, strerror(errno), errlen);
-        tn_close();
-        return -1;
-    }
-    if (rc < 0) {
-        FD_ZERO(&wfds);
-        FD_SET(tn_sock, &wfds);
-        tv.tv_sec = timeout_ms / 1000;
-        tv.tv_usec = (timeout_ms % 1000) * 1000;
-        rc = select(tn_sock + 1, NULL, &wfds, NULL, &tv);
-        if (rc <= 0) {
-            s_copy(err, rc == 0 ? "Connection timed out" : strerror(errno), errlen);
-            tn_close();
-            return -1;
-        }
-        soerr = 0;
-        slen = (tn_socklen_t)sizeof(soerr);
-        getsockopt(tn_sock, SOL_SOCKET, SO_ERROR, (char *)&soerr, &slen);
-        if (soerr != 0) {
-            s_copy(err, strerror(soerr), errlen);
-            tn_close();
-            return -1;
-        }
-    }
+    tn_sock = net_connect(host, port, timeout_ms, err, errlen);
+    if (tn_sock < 0) return -1;
     if (!tn_buf.data) dbuf_init(&tn_buf);
     dbuf_clear(&tn_buf);
     tn_state = ST_DATA;
@@ -283,8 +179,8 @@ int tn_begin(const char *cmd)
     }
     dbuf_clear(&tn_buf);
     tn_inflight = 1;
-    if (write_all(cmd, strlen(cmd)) < 0 ||
-        write_all(tn_eol_str, strlen(tn_eol_str)) < 0) {
+    if (net_write_all(tn_sock, cmd, strlen(cmd)) < 0 ||
+        net_write_all(tn_sock, tn_eol_str, strlen(tn_eol_str)) < 0) {
         tn_close();
         return -1;
     }
@@ -369,7 +265,7 @@ char *tn_take_response(const char *cmd)
 
 int tn_wait(int timeout_ms)
 {
-    long deadline = now_ms() + timeout_ms, left;
+    long deadline = net_now_ms() + timeout_ms, left;
     fd_set rfds;
     struct timeval tv;
     int rc;
@@ -377,7 +273,7 @@ int tn_wait(int timeout_ms)
     for (;;) {
         rc = tn_pump();
         if (rc != TN_AGAIN) return rc;
-        left = deadline - now_ms();
+        left = deadline - net_now_ms();
         if (left <= 0) return TN_TIMEOUT;
         FD_ZERO(&rfds);
         FD_SET(tn_sock, &rfds);
@@ -401,12 +297,12 @@ int tn_exec(const char *cmd, int timeout_ms, char **out)
 /* collect input until quiet for quiet_ms or total_ms passed */
 static void collect_quiet(int quiet_ms, int total_ms)
 {
-    long start = now_ms(), last = now_ms();
+    long start = net_now_ms(), last = net_now_ms();
     fd_set rfds;
     struct timeval tv;
     int n;
 
-    while (now_ms() - start < total_ms && now_ms() - last < quiet_ms) {
+    while (net_now_ms() - start < total_ms && net_now_ms() - last < quiet_ms) {
         FD_ZERO(&rfds);
         FD_SET(tn_sock, &rfds);
         tv.tv_sec = 0;
@@ -417,7 +313,7 @@ static void collect_quiet(int quiet_ms, int total_ms)
                 tn_close();
                 return;
             }
-            if (n > 0) last = now_ms();
+            if (n > 0) last = net_now_ms();
         }
     }
 }

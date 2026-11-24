@@ -2,6 +2,8 @@
  * dialogs.c - Motif dialogs: brick, console, settings, text output, about
  */
 #include <stdio.h>
+#include <errno.h>
+#include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -22,6 +24,7 @@
 
 #include "app.h"
 #include "l2client.h"
+#include "net.h"
 #include "rack.h"
 #include "util.h"
 
@@ -536,6 +539,254 @@ void dlg_console(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* L2 terminal: the L2's console port, as l2term reaches it            */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The SMP port (8001, or 8003 whose sessions the L2 does not log): a plain
+ * byte stream with no telnet negotiation. The L2 echoes what is typed,
+ * ends lines with CR LF and sends its prompt on connect. Each dialog is
+ * its own console session.
+ */
+
+static Widget    tm_form, tm_out, tm_in;
+static int       tm_sock = -1;
+static XtInputId tm_input;
+static int       tm_input_active;
+static int       tm_esc;            /* 0 text, 1 after ESC, 2 in a CSI sequence */
+
+static void tm_append(const char *s)
+{
+    XmTextPosition pos;
+    if (!tm_out || !*s) return;
+    pos = XmTextGetLastPosition(tm_out);
+    XmTextInsert(tm_out, pos, (char *)s);
+    pos = XmTextGetLastPosition(tm_out);
+    XmTextSetInsertionPosition(tm_out, pos);
+    XmTextShowPosition(tm_out, pos);
+}
+
+/* backspace: remove the last character shown, unless it ends a line */
+static void tm_backspace(DBuf *pending)
+{
+    XmTextPosition last;
+    char buf[2];
+    if (pending->len > 0) {
+        if (pending->data[pending->len - 1] != '\n')
+            pending->data[--pending->len] = '\0';
+        return;
+    }
+    last = XmTextGetLastPosition(tm_out);
+    if (last <= 0) return;
+    if (XmTextGetSubstring(tm_out, last - 1, 1, sizeof(buf), buf) == XmCOPY_SUCCEEDED &&
+        buf[0] != '\n')
+        XmTextReplace(tm_out, last - 1, last, "");
+}
+
+static void tm_close(const char *why)
+{
+    if (tm_input_active) XtRemoveInput(tm_input);
+    tm_input_active = 0;
+    if (tm_sock >= 0) close(tm_sock);
+    tm_sock = -1;
+    if (why && tm_out) {
+        tm_append("\n*** ");
+        tm_append(why);
+        tm_append("\n");
+    }
+}
+
+static void tm_on_input(XtPointer cd, int *fd, XtInputId *id)
+{
+    unsigned char buf[2048];
+    DBuf out;
+    ssize_t n;
+    int i, closed = 0;
+    unsigned char c;
+    (void)cd;
+    (void)fd;
+    (void)id;
+
+    dbuf_init(&out);
+    for (;;) {
+        n = read(tm_sock, buf, sizeof(buf));
+        if (n > 0) {
+            for (i = 0; i < (int)n; i++) {
+                c = buf[i];
+                if (tm_esc == 1) {              /* ESC x, or ESC [ ... */
+                    tm_esc = c == '[' ? 2 : 0;
+                    continue;
+                }
+                if (tm_esc == 2) {              /* CSI ends with 0x40..0x7e */
+                    if (c >= 0x40 && c <= 0x7e) tm_esc = 0;
+                    continue;
+                }
+                if (c == 0x1b) tm_esc = 1;
+                else if (c == '\b' || c == 0x7f) {
+                    tm_append(out.data);
+                    dbuf_clear(&out);
+                    tm_backspace(&out);
+                } else if (c == '\n' || c == '\t' || (c >= 0x20 && c < 0x7f))
+                    dbuf_appendc(&out, (char)c);
+                /* (CR, BEL and other control bytes are dropped) */
+            }
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) closed = 1;
+        break;
+    }
+    tm_append(out.data);
+    dbuf_free(&out);
+    if (closed) tm_close("The L2 closed the console - press Reconnect");
+}
+
+static void tm_connect(void)
+{
+    char err[256], msg[400];
+    int port = cfg_console_port(&g_cfg);
+
+    tm_close(NULL);
+    tm_esc = 0;
+    sprintf(msg, "*** Connecting to %.200s:%d ...\n", g_cfg.host, port);
+    tm_append(msg);
+    XmUpdateDisplay(tm_out);
+    tm_sock = net_connect(g_cfg.host, port, 5000, err, sizeof(err));
+    if (tm_sock < 0) {
+        sprintf(msg, "*** Can't reach the L2's console: %.250s\n", err);
+        tm_append(msg);
+        return;
+    }
+    tm_input = XtAppAddInput(g_app, tm_sock, (XtPointer)XtInputReadMask, tm_on_input, NULL);
+    tm_input_active = 1;
+    tm_append("*** Connected. Ctrl-T switches between L2 and console mode.\n");
+}
+
+static void tm_send(const char *data, size_t len)
+{
+    if (tm_sock < 0) {
+        tm_append("*** Not connected - press Reconnect\n");
+        return;
+    }
+    if (net_write_all(tm_sock, data, len) < 0)
+        tm_close("Write to the L2's console failed - press Reconnect");
+}
+
+static void tm_activate(Widget w, XtPointer cd, XtPointer cbs)
+{
+    char *line = XmTextFieldGetString(tm_in);
+    (void)w;
+    (void)cd;
+    (void)cbs;
+    tm_send(line, strlen(line));
+    tm_send("\r", 1);
+    XtFree(line);
+    XmTextFieldSetString(tm_in, "");
+}
+
+static void tm_ctrl_cb(Widget w, XtPointer cd, XtPointer cbs)
+{
+    char c = (char)(long)cd;
+    (void)w;
+    (void)cbs;
+    tm_send(&c, 1);
+}
+
+static void tm_reconnect_cb(Widget w, XtPointer cd, XtPointer cbs)
+{
+    (void)w;
+    (void)cd;
+    (void)cbs;
+    tm_connect();
+}
+
+static void tm_clear_cb(Widget w, XtPointer cd, XtPointer cbs)
+{
+    (void)w;
+    (void)cd;
+    (void)cbs;
+    XmTextSetString(tm_out, "");
+}
+
+static void tm_destroy_cb(Widget w, XtPointer cd, XtPointer cbs)
+{
+    (void)w;
+    (void)cd;
+    (void)cbs;
+    tm_out = NULL;
+    tm_close(NULL);
+    tm_form = NULL;
+}
+
+void dlg_terminal(void)
+{
+    Widget rc, lbl;
+    Arg a[12];
+    int n = 0;
+    char title[300];
+
+    if (g_demo) {
+        dlg_error("The L2 Terminal needs a real L2 (not available in demo mode).");
+        return;
+    }
+    if (!g_cfg.host[0]) {
+        dlg_error("No L2 host configured - see File > Settings.");
+        return;
+    }
+    if (tm_form) {
+        XRaiseWindow(XtDisplay(tm_form), XtWindow(XtParent(tm_form)));
+        return;
+    }
+    sprintf(title, "L2 Terminal - %.200s:%d", g_cfg.host, cfg_console_port(&g_cfg));
+    tm_form = form_dialog("terminalDialog", title, 1);
+    XtAddCallback(tm_form, XmNdestroyCallback, tm_destroy_cb, NULL);
+
+    rc = button_row(tm_form);
+    button(rc, "ctrlC", "Ctrl-C", tm_ctrl_cb, (XtPointer)(long)0x03);
+    button(rc, "ctrlD", "Ctrl-D", tm_ctrl_cb, (XtPointer)(long)0x04);
+    button(rc, "ctrlT", "Ctrl-T (L2 / console)", tm_ctrl_cb, (XtPointer)(long)0x14);
+    button(rc, "reconnect", "Reconnect", tm_reconnect_cb, NULL);
+    button(rc, "clear", "Clear", tm_clear_cb, NULL);
+    button(rc, "close", "Close", destroy_shell_cb, (XtPointer)XtParent(tm_form));
+
+    lbl = label(tm_form, "terminalLabel", "Send:");
+    XtVaSetValues(lbl,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_WIDGET,
+                  XmNbottomWidget, row_separator(rc),
+                  XmNbottomOffset, 12,
+                  NULL);
+    tm_in = XtVaCreateManagedWidget("terminalIn", xmTextFieldWidgetClass, tm_form,
+                                    XmNleftAttachment, XmATTACH_WIDGET,
+                                    XmNleftWidget, lbl,
+                                    XmNrightAttachment, XmATTACH_FORM,
+                                    XmNbottomAttachment, XmATTACH_WIDGET,
+                                    XmNbottomWidget, row_separator(rc),
+                                    XmNbottomOffset, 6,
+                                    NULL);
+    XtAddCallback(tm_in, XmNactivateCallback, tm_activate, NULL);
+
+    XtSetArg(a[n], XmNeditMode, XmMULTI_LINE_EDIT); n++;
+    XtSetArg(a[n], XmNeditable, False); n++;
+    XtSetArg(a[n], XmNcursorPositionVisible, False); n++;
+    XtSetArg(a[n], XmNrows, 24); n++;
+    XtSetArg(a[n], XmNcolumns, 80); n++;
+    tm_out = XmCreateScrolledText(tm_form, "terminalOut", a, n);
+    XtVaSetValues(XtParent(tm_out),
+                  XmNtopAttachment, XmATTACH_FORM,
+                  XmNleftAttachment, XmATTACH_FORM,
+                  XmNrightAttachment, XmATTACH_FORM,
+                  XmNbottomAttachment, XmATTACH_WIDGET,
+                  XmNbottomWidget, tm_in,
+                  XmNbottomOffset, 6,
+                  NULL);
+    XtManageChild(tm_out);
+    XtVaSetValues(tm_form, XmNinitialFocus, tm_in, NULL);
+    XtManageChild(tm_form);
+    tm_connect();
+}
+
+/* ------------------------------------------------------------------ */
 /* rack info                                                           */
 /* ------------------------------------------------------------------ */
 
@@ -577,6 +828,51 @@ void dlg_rackinfo(void)
 
 static Widget st_form, st_host, st_port, st_prompt, st_timeout, st_refresh, st_order;
 static Widget st_crlf, st_asc, st_custom, st_ralt, st_grey, st_confirm;
+static Widget st_direct, st_telnet, st_l2port, st_password, st_quiet;
+static char   st_pw[64];        /* the password typed (the field shows stars) */
+
+/* keep the real password in st_pw and show '*' for each character */
+static void st_pw_verify(Widget w, XtPointer cd, XtPointer cbs)
+{
+    XmTextVerifyCallbackStruct *v = (XmTextVerifyCallbackStruct *)cbs;
+    char nb[sizeof(st_pw)];
+    size_t len = strlen(st_pw), s0, e0, ins, i;
+    (void)w;
+    (void)cd;
+
+    s0 = v->startPos < 0 ? 0 : (size_t)v->startPos;
+    e0 = v->endPos < 0 ? 0 : (size_t)v->endPos;
+    if (s0 > len) s0 = len;
+    if (e0 > len) e0 = len;
+    if (e0 < s0) e0 = s0;
+    ins = (v->text && v->text->ptr) ? (size_t)v->text->length : 0;
+    if (s0 + ins + (len - e0) >= sizeof(st_pw)) {
+        v->doit = False;
+        return;
+    }
+    memcpy(nb, st_pw, s0);
+    if (ins) memcpy(nb + s0, v->text->ptr, ins);
+    memcpy(nb + s0 + ins, st_pw + e0, len - e0);
+    nb[s0 + ins + len - e0] = '\0';
+    strcpy(st_pw, nb);
+    for (i = 0; i < ins; i++) v->text->ptr[i] = '*';
+}
+
+/* only the fields of the chosen connection are active */
+static void st_conn_changed(Widget w, XtPointer cd, XtPointer cbs)
+{
+    Boolean d;
+    (void)w;
+    (void)cd;
+    (void)cbs;
+    if (!st_form) return;
+    d = XmToggleButtonGetState(st_direct);
+    XtSetSensitive(st_l2port, d);
+    XtSetSensitive(st_password, d);
+    XtSetSensitive(st_port, !d);
+    XtSetSensitive(st_prompt, !d);
+    XtSetSensitive(st_crlf, !d);
+}
 
 static Widget st_field(Widget grid, const char *lbl, const char *name, const char *val)
 {
@@ -602,6 +898,11 @@ static void st_apply(int save)
     int reconnect;
 
     st_get(st_host, c.host, sizeof(c.host));
+    c.conn = XmToggleButtonGetState(st_telnet) ? CONN_TELNET : CONN_DIRECT;
+    st_get(st_l2port, tmp, sizeof(tmp));
+    c.l2port = atoi(tmp) > 0 ? atoi(tmp) : 8000;
+    s_copy(c.password, st_pw, sizeof(c.password));
+    c.consoleQuiet = XmToggleButtonGetState(st_quiet) ? 1 : 0;
     st_get(st_port, tmp, sizeof(tmp));
     c.port = atoi(tmp) > 0 ? atoi(tmp) : 23;
     st_get(st_prompt, c.prompt, sizeof(c.prompt));
@@ -618,7 +919,9 @@ static void st_apply(int save)
     c.confirmPower = XmToggleButtonGetState(st_confirm) ? 1 : 0;
 
     reconnect = strcmp(c.host, g_cfg.host) != 0 || c.port != g_cfg.port ||
-                strcmp(c.prompt, g_cfg.prompt) != 0 || c.eol != g_cfg.eol;
+                strcmp(c.prompt, g_cfg.prompt) != 0 || c.eol != g_cfg.eol ||
+                c.conn != g_cfg.conn || c.l2port != g_cfg.l2port ||
+                strcmp(c.password, g_cfg.password) != 0;
     g_cfg = c;
     if (save) {
         if (!cfg_save(&g_cfg, g_cfgpath)) {
@@ -655,8 +958,11 @@ static void st_destroy_cb(Widget w, XtPointer cd, XtPointer cbs)
 
 void dlg_settings(void)
 {
-    Widget rc, col, grid, frame, opts, save;
-    char port[16], timeout[16], refresh[16];
+    Widget rc, col, grid, frame, opts, save, radio;
+    char port[16], l2port[16], timeout[16], refresh[16], stars[sizeof(st_pw)];
+    Arg a[4];
+    int n = 0;
+    size_t i;
 
     if (st_form) {
         XRaiseWindow(XtDisplay(st_form), XtWindow(XtParent(st_form)));
@@ -681,20 +987,36 @@ void dlg_settings(void)
                                   XmNbottomOffset, 6,
                                   NULL);
 
-    label(col, "sectionLabel", "L2 controller connection (telnet)");
+    label(col, "sectionLabel", "L2 controller connection");
+    XtSetArg(a[n], XmNorientation, XmHORIZONTAL); n++;
+    radio = XmCreateRadioBox(col, "connection", a, n);
+    st_direct = toggle(radio, "direct", "Direct L2 (port 8000, recommended)",
+                       g_cfg.conn == CONN_DIRECT);
+    st_telnet = toggle(radio, "telnet", "Telnet", g_cfg.conn == CONN_TELNET);
+    XtAddCallback(st_direct, XmNvalueChangedCallback, st_conn_changed, NULL);
+    XtManageChild(radio);
+
     grid = XtVaCreateManagedWidget("grid", xmRowColumnWidgetClass, col,
                                    XmNorientation, XmHORIZONTAL,
                                    XmNpacking, XmPACK_COLUMN,
-                                   XmNnumColumns, 6,
+                                   XmNnumColumns, 8,
                                    XmNisAligned, True,
                                    XmNentryAlignment, XmALIGNMENT_END,
                                    NULL);
     sprintf(port, "%d", g_cfg.port);
+    sprintf(l2port, "%d", g_cfg.l2port);
     sprintf(timeout, "%d", g_cfg.timeout);
     sprintf(refresh, "%d", g_cfg.refresh);
     st_host = st_field(grid, "L2 host / IP:", "host", g_cfg.host);
+    st_l2port = st_field(grid, "L2 port (direct):", "l2port", l2port);
+    /* (the stars are set before the callback, which keeps the real text) */
+    s_copy(st_pw, g_cfg.password, sizeof(st_pw));
+    for (i = 0; st_pw[i]; i++) stars[i] = '*';
+    stars[i] = '\0';
+    st_password = st_field(grid, "L2 password (direct):", "password", stars);
+    XtAddCallback(st_password, XmNmodifyVerifyCallback, st_pw_verify, NULL);
     st_port = st_field(grid, "Telnet port:", "port", port);
-    st_prompt = st_field(grid, "L2 prompt (empty = detect):", "prompt", g_cfg.prompt);
+    st_prompt = st_field(grid, "L2 prompt (telnet, empty = detect):", "prompt", g_cfg.prompt);
     st_timeout = st_field(grid, "Command timeout (s):", "timeout", timeout);
     st_refresh = st_field(grid, "Auto refresh (s, 0 = off):", "refresh", refresh);
     st_order = st_field(grid, "Custom sort order:", "sortOrder", g_cfg.sortOrder);
@@ -702,7 +1024,10 @@ void dlg_settings(void)
     frame = XtVaCreateManagedWidget("optionsFrame", xmFrameWidgetClass, col, NULL);
     opts = XtVaCreateManagedWidget("options", xmRowColumnWidgetClass, frame,
                                    XmNorientation, XmVERTICAL, NULL);
-    st_crlf = toggle(opts, "crlf", "Send CR+LF line endings (default: LF)", g_cfg.eol == EOL_CRLF);
+    st_crlf = toggle(opts, "crlf", "Telnet: send CR+LF line endings (default: LF)",
+                     g_cfg.eol == EOL_CRLF);
+    st_quiet = toggle(opts, "consoleQuiet", "L2 Terminal: quiet console (port 8003, not logged)",
+                      g_cfg.consoleQuiet);
     st_asc = toggle(opts, "ascending", "Sort bricks ascending (default: descending)",
                     g_cfg.sortMode == L2_SORT_ASC);
     st_custom = toggle(opts, "customSort", "Use custom sort order",
@@ -712,5 +1037,6 @@ void dlg_settings(void)
     st_confirm = toggle(opts, "confirmPower", "Confirm power up / down", g_cfg.confirmPower);
 
     XtVaSetValues(st_form, XmNdefaultButton, save, NULL);
+    st_conn_changed(NULL, NULL, NULL);
     XtManageChild(st_form);
 }
