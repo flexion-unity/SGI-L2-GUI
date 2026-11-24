@@ -1,0 +1,4 @@
+*.o
+/sgil2gui
+/tests/test_l2parse
+core
