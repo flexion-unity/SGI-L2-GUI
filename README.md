@@ -34,7 +34,8 @@ make install    # as root: /usr/local/bin/sgil2gui + app-defaults
 ## Usage
 
 ```sh
-sgil2gui                                 # uses ~/.sgil2guirc
+sgil2gui                                 # launch GUI. uses ~/.sgil2guirc
+
 sgil2gui -host 192.168.0.100             # override the L2 host
 sgil2gui -host l2 -prompt "SGI-L2-001-L2>"
 sgil2gui -demo                           # built-in L2 simulator, no hardware

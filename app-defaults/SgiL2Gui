@@ -1,0 +1,23 @@
+! SgiL2Gui - X resources for sgil2gui
+! install to /usr/lib/X11/app-defaults/SgiL2Gui (make install)
+! or load with: xrdb -merge app-defaults/SgiL2Gui
+
+! IRIX Indigo Magic look
+SgiL2Gui*sgiMode:                 true
+SgiL2Gui*useSchemes:              all
+
+! fonts used inside the rack drawing (X core font names)
+SgiL2Gui.lcdFont:    -adobe-helvetica-medium-r-normal--8-*-*-*-p-*-iso8859-1
+SgiL2Gui.labelFont:  -adobe-helvetica-bold-r-normal--12-*-*-*-p-*-iso8859-1
+SgiL2Gui.sysidFont:  -adobe-helvetica-bold-r-normal--14-*-*-*-p-*-iso8859-1
+
+! text output, console and brick dialog
+SgiL2Gui*outputText.fontList:     fixed
+SgiL2Gui*consoleOut.fontList:     fixed
+SgiL2Gui*consoleIn.fontList:      fixed
+SgiL2Gui*brickInfo.fontList:      fixed
+SgiL2Gui*brickTitle.fontList:     -*-helvetica-bold-r-normal--14-*-*-*-*-*-iso8859-1
+SgiL2Gui*lcdLine.fontList:        -*-courier-bold-r-normal--14-*-*-*-*-*-iso8859-1
+SgiL2Gui*lcdFrame*background:     #a4b47c
+SgiL2Gui*lcdLine.foreground:      #101010
+SgiL2Gui*statusLabel.alignment:   XmALIGNMENT_BEGINNING
