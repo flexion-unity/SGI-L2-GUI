@@ -11,10 +11,12 @@ Based on [SGI-L2-WUI](https://github.com/flexion-unity/SGI-L2-WUI) by flexion, c
 * L2 console, rack config info, environment summary, fan status
 * custom brick sort order to match your physical rack
 
+<img src="res/img/sgil2gui-demo.png" width="1024">
+
 Supported bricks: Origin 300, Origin 350, Onyx 350,
 Tezro (rackmount), Altix 350 (yellow or grey bezel), Altix 3000 C-brick, Altix 3000 iX-brick, NL4R, router (Origin or Altix style).
 
-<img src="res/img/sgil2gui-demo.png" width="420">
+<img src="res/img/sgil2gui-demo2.png" width="646">
 
 * Click a brick to open its dialog: LCD, details, Attention / Failure LED switches, power button.
 * **Rack** menu / toolbar: refresh, power the whole rack up / down, env summary, fan status, router info.
